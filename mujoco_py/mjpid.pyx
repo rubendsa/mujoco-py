@@ -41,6 +41,8 @@ cdef mjtNum c_pid_bias(const mjModel* m, const mjData* d, int id) with gil:
     cdef double error = d.ctrl[id] - d.actuator_length[id]
     cdef int NGAIN = int(const.NGAIN)
 
+    cdef double test = d.ctrl[id]
+
     cdef double Kp = m.actuator_gainprm[id * NGAIN + IDX_PROPORTIONAL_GAIN]
     cdef double error_deadband = m.actuator_gainprm[id * NGAIN + IDX_ERROR_DEADBAND]
     cdef double integral_max_clamp = m.actuator_gainprm[id * NGAIN + IDX_INTEGRAL_MAX_CLAMP]
