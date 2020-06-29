@@ -1,5 +1,8 @@
 from libc.math cimport fabs, fmax, fmin
 from mujoco_py.generated import const
+import numpy as np
+import collections
+
 
 """
   Kp == Kp
@@ -29,7 +32,14 @@ cdef enum USER_DEFINED_CONTROLLER_DATA:
     IDX_INTEGRAL_ERROR = 0,
     IDX_LAST_ERROR = 1,
     IDX_DERIVATIVE_ERROR_LAST = 2,
-    NUM_USER_DATA_PER_ACT = 3,
+    IDX_DERIVATIVE_CTRL_LIST = 3
+    NUM_USER_DATA_PER_ACT = 4,
+
+ctrl_queue = []
+for i in range(7):
+    ctrl_queue.append(collections.deque(maxlen=40))
+
+ctrl_ref = np.zeros(7)
 
 
 cdef mjtNum c_zero_gains(const mjModel* m, const mjData* d, int id) with gil:
@@ -38,10 +48,14 @@ cdef mjtNum c_zero_gains(const mjModel* m, const mjData* d, int id) with gil:
 
 cdef mjtNum c_pid_bias(const mjModel* m, const mjData* d, int id) with gil:
     cdef double dt_in_sec = m.opt.timestep
-    cdef double error = d.ctrl[id] - d.actuator_length[id]
-    cdef int NGAIN = int(const.NGAIN)
+    ctrl_queue[id].append(d.ctrl[id])
+    ctrl_ref[id] = np.sum(ctrl_queue[id])/40
+    # print('id', id, ctrl_ref[id])
 
-    cdef double test = d.ctrl[id]
+    # cdef double ctrl_ref = d.ctrl[id]
+
+    cdef double error = ctrl_ref[id] - d.actuator_length[id]
+    cdef int NGAIN = int(const.NGAIN)
 
     cdef double Kp = m.actuator_gainprm[id * NGAIN + IDX_PROPORTIONAL_GAIN]
     cdef double error_deadband = m.actuator_gainprm[id * NGAIN + IDX_ERROR_DEADBAND]
@@ -75,6 +89,7 @@ cdef mjtNum c_pid_bias(const mjModel* m, const mjData* d, int id) with gil:
 
     cdef double derivative_error_term = derivative_error * derivate_time_const
 
+
     f = Kp * (error + integral_error_term + derivative_error_term)
     # print(id, d.ctrl[id], d.actuator_length[id], error, integral_error_term, derivative_error_term,
     #    derivative_error, dt_in_sec, last_error, integral_error, derivative_error_last, f)
@@ -82,9 +97,14 @@ cdef mjtNum c_pid_bias(const mjModel* m, const mjData* d, int id) with gil:
     d.userdata[id * NUM_USER_DATA_PER_ACT + IDX_LAST_ERROR] = error
     d.userdata[id * NUM_USER_DATA_PER_ACT + IDX_DERIVATIVE_ERROR_LAST] = derivative_error
     d.userdata[id * NUM_USER_DATA_PER_ACT + IDX_INTEGRAL_ERROR] = integral_error
-    
+
+    f += d.qfrc_bias[id]
+
     if effort_limit_low != 0.0 or effort_limit_high != 0.0:
         f = fmax(effort_limit_low, fmin(effort_limit_high, f))
+
+
+
     return f
 
 
