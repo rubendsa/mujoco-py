@@ -35,11 +35,14 @@ cdef enum USER_DEFINED_CONTROLLER_DATA:
     IDX_DERIVATIVE_CTRL_LIST = 3
     NUM_USER_DATA_PER_ACT = 4,
 
-ctrl_queue = []
-for i in range(7):
-    ctrl_queue.append(collections.deque(maxlen=40))
+cdef int SMA_WINDOW = 40
+cdef int NUM_PID = 7
 
-ctrl_ref = np.zeros(7)
+ctrl_queue = []
+for i in range(NUM_PID):
+    ctrl_queue.append(collections.deque(maxlen=SMA_WINDOW))
+
+ctrl_ref = np.zeros(NUM_PID)
 
 
 cdef mjtNum c_zero_gains(const mjModel* m, const mjData* d, int id) with gil:
@@ -49,10 +52,7 @@ cdef mjtNum c_zero_gains(const mjModel* m, const mjData* d, int id) with gil:
 cdef mjtNum c_pid_bias(const mjModel* m, const mjData* d, int id) with gil:
     cdef double dt_in_sec = m.opt.timestep
     ctrl_queue[id].append(d.ctrl[id])
-    ctrl_ref[id] = np.sum(ctrl_queue[id])/40
-    # print('id', id, ctrl_ref[id])
-
-    # cdef double ctrl_ref = d.ctrl[id]
+    ctrl_ref[id] = np.sum(ctrl_queue[id])/SMA_WINDOW
 
     cdef double error = ctrl_ref[id] - d.actuator_length[id]
     cdef int NGAIN = int(const.NGAIN)
