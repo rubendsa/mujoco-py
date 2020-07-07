@@ -1,5 +1,7 @@
 from libc.math cimport fabs, fmax, fmin
 from mujoco_py.generated import const
+import numpy as np
+
 
 """
   Kp == Kp
@@ -23,13 +25,20 @@ cdef enum USER_DEFINED_ACTUATOR_PARAMS:
     IDX_DERIVATIVE_TIME_CONSTANT = 3,
     IDX_DERIVATIVE_GAIN_SMOOTHING = 4,
     IDX_ERROR_DEADBAND = 5,
+    IDX_F_SMOOTH = 6,
 
 
 cdef enum USER_DEFINED_CONTROLLER_DATA:
     IDX_INTEGRAL_ERROR = 0,
     IDX_LAST_ERROR = 1,
     IDX_DERIVATIVE_ERROR_LAST = 2,
-    NUM_USER_DATA_PER_ACT = 3,
+    IDX_DERIVATIVE_CTRL_LIST = 3
+    IDX_CTRL_REF = 4
+    IDX_F_LAST = 5
+    NUM_USER_DATA_PER_ACT = 6,
+
+
+cdef float EMA_SMOOTH;
 
 
 cdef mjtNum c_zero_gains(const mjModel* m, const mjData* d, int id) with gil:
@@ -38,6 +47,7 @@ cdef mjtNum c_zero_gains(const mjModel* m, const mjData* d, int id) with gil:
 
 cdef mjtNum c_pid_bias(const mjModel* m, const mjData* d, int id) with gil:
     cdef double dt_in_sec = m.opt.timestep
+
     cdef double error = d.ctrl[id] - d.actuator_length[id]
     cdef int NGAIN = int(const.NGAIN)
 
@@ -73,6 +83,7 @@ cdef mjtNum c_pid_bias(const mjModel* m, const mjData* d, int id) with gil:
 
     cdef double derivative_error_term = derivative_error * derivate_time_const
 
+
     f = Kp * (error + integral_error_term + derivative_error_term)
     # print(id, d.ctrl[id], d.actuator_length[id], error, integral_error_term, derivative_error_term,
     #    derivative_error, dt_in_sec, last_error, integral_error, derivative_error_last, f)
@@ -80,15 +91,80 @@ cdef mjtNum c_pid_bias(const mjModel* m, const mjData* d, int id) with gil:
     d.userdata[id * NUM_USER_DATA_PER_ACT + IDX_LAST_ERROR] = error
     d.userdata[id * NUM_USER_DATA_PER_ACT + IDX_DERIVATIVE_ERROR_LAST] = derivative_error
     d.userdata[id * NUM_USER_DATA_PER_ACT + IDX_INTEGRAL_ERROR] = integral_error
+
+
+
+
+    """ 
+    Inverse Dynamic (ID) Controller
     
+    qacc:               Joint acceleration.
+    qfrc_applied:       Torques applied directly to the joints.
+    xfrc_applied:       Cartesian forces applied directly to bodies.
+    qfrc_actuator:      Torques applied directly to the actuators.
+    Jx'*xfrc_applied:   Joint torque resulting from cartesian forces (xfrc_applied).
+    
+    qfrc_inverse gives the joint torques necessary to achieve a desired joint acceleration (qacc) given 
+    internal and external forces and torques. ID control solves the following torque balance by calling
+    mjinverse(model, data):
+    
+        qfrc_inverse = qfrc_applied + Jx'*xfrc_applied + qfrc_actuator
+
+    The error in desired joint acceleration is wrapped using a PD controller.
+    To provide a smooth reference signal for the ID controller, an Exponential Moving Average (EMA) is
+    used on the reference control signal (ctrl_ema). 
+    """
+
+    # Read old smooth control signal from user data
+    ctrl_ema = d.userdata[id * NUM_USER_DATA_PER_ACT + IDX_CTRL_REF]
+
+    # Apply an Exponential Moving Average (EMA) to desired control
+    ctrl_ema = (EMA_SMOOTH * ctrl_ema) + (1-EMA_SMOOTH) * d.ctrl[id]
+
+    NUM_ARM_ACTUATORS = 6
+
+    if id in range(NUM_ARM_ACTUATORS):
+        qpos_des = ctrl_ema
+        qvel_des = 0
+
+        qpos_error = qpos_des - d.qpos[id]
+        qvel_error = qvel_des - d.qvel[id]
+
+        # PD gains for desired acceleration
+        kp = m.actuator_gainprm[id * NGAIN + IDX_PROPORTIONAL_GAIN]
+        kd = m.actuator_gainprm[id * NGAIN + IDX_DERIVATIVE_TIME_CONSTANT]
+
+        # Set desired acceleration of all DoFs (model.nv) to zero except the target actuator [id]
+        qacc_des = np.zeros(m.nv)
+        qacc_des[id] = kp * qpos_error + kd * qvel_error
+
+        # Set the target forward dyanmics
+        for i in range(m.nv):
+            d.qacc[i] = qacc_des[i]
+
+        # Compute the inverse dynamics and get the joint torque
+        mj_inverse(m, d)
+        joint_torque = d.qfrc_inverse[id]
+
+        # Write the joint torque
+        f = joint_torque
+
+    # Clip joint torque to be within forcerange if specified
     if effort_limit_low != 0.0 or effort_limit_high != 0.0:
         f = fmax(effort_limit_low, fmin(effort_limit_high, f))
+
+    # Save smooth control signal in userdata
+    d.userdata[id * NUM_USER_DATA_PER_ACT + IDX_CTRL_REF] = ctrl_ema
+
     return f
 
 
-def set_pid_control(m, d):
+def set_pid_control(m, d, n_smooth):
     global mjcb_act_gain
     global mjcb_act_bias
+    global EMA_SMOOTH
+
+    EMA_SMOOTH = n_smooth
 
     if m.nuserdata < m.nu * NUM_USER_DATA_PER_ACT:
         raise Exception('nuserdata is not set large enough to store PID internal states')
